@@ -66,7 +66,7 @@ To exit the client, type quit.
 
 ## Configuration
 
-Server configurations such as host, port, and storage file path can be adjusted in the package/config/settings.yaml file.
+Server configurations such as host, port, and storage file path can be adjusted in the `package/config/settings.yaml` file.
 
 ## Testing
 
