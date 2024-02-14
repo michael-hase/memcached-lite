@@ -1,7 +1,12 @@
 import socket
 import threading
 import yaml
+import time
+import random
 import os
+import logging
+import json
+import signal
 
 # Load server config file
 with open('package/config/settings.yaml', 'r') as config_file:
@@ -9,62 +14,80 @@ with open('package/config/settings.yaml', 'r') as config_file:
 
 HOST = config['server']['host']
 PORT = config['server']['port']
-STORAGE_FILE = 'data/storage.yaml'
+STORAGE_FILE = 'data/storage.json'
 
-# Ensure data directory exists
+# Check to make sure data directory exists
 os.makedirs(os.path.dirname(STORAGE_FILE), exist_ok=True)
 
-data_store = {}
 
 # Load data from storage file if exists
-if os.path.exists(STORAGE_FILE):
-    with open(STORAGE_FILE, 'r') as f:
-        data_store = yaml.safe_load(f) or {}
+def load_data():
+    if os.path.exists(STORAGE_FILE):
+        with open(STORAGE_FILE, 'r') as f:
+            return json.load(f)
+    return {}
 
 
-def save_data():
-    """Save the data store to a file (YAML format)."""
+def save_data(data):
     with open(STORAGE_FILE, 'w') as f:
-        yaml.dump(data_store, f)
+        json.dump(data, f)
+
+
+data_store = load_data()
+lock = threading.Lock()  # Add a lock for thread-safe access to data_store
+
+# Configure logging
+logging.basicConfig(filename='server.log', level=logging.ERROR)
 
 
 def handle_client(client_socket):
     while True:
         try:
-            data = client_socket.recv(1024).decode('utf-8').strip()
-            if not data:
+            header = client_socket.recv(1024).decode('utf-8').strip()
+            if not header:
                 break
 
-            parts = data.split()
+            # Introduce a small random delay
+            time.sleep(random.uniform(0, 1))  # Sleep for up to 1 second
+
+            parts = header.split()
             command = parts[0]
 
             if command == 'get':
-                # Implementation for 'get' command
                 key = parts[1]
-                value = data_store.get(key, None)
+                with lock:
+                    value = data_store.get(key, None)
                 if value is not None:
                     response = f"VALUE {key} 0 {len(value)}\r\n{value}\r\nEND\r\n"
                 else:
                     response = "END\r\n"
                 client_socket.sendall(response.encode('utf-8'))
 
-            elif command == 'set':
-                # Implementation for 'set' command
-                if len(parts) >= 5:
-                    key, flags, exptime, bytes_length = parts[1], parts[2], parts[3], parts[4]
-                    data_block = client_socket.recv(int(bytes_length) + 2)
-                    data_block = data_block.decode('utf-8').rstrip('\r\n')
-                    data_store[key] = data_block
-                    save_data()
-                    client_socket.sendall(b"STORED\r\n")
+            elif command == 'set' and len(parts) == 3:
+                key, value_size_str = parts[1], parts[2]
+                value_size = int(value_size_str)
+
+                # Read value based on the specified size
+                value_data = client_socket.recv(value_size).decode('utf-8')
+
+                # Consume the trailing \r\n after the value if needed
+                client_socket.recv(2)
+
+                # Check if the key already exists
+                if key in data_store:
+                    client_socket.sendall(b"NOT-STORED\r\n")
                 else:
-                    client_socket.sendall(b"ERROR\r\n")
+                    with lock:
+                        data_store[key] = value_data
+                        save_data(data_store)  # Persist data to the filesystem
+                    client_socket.sendall(b"STORED\r\n")
 
             else:
                 client_socket.sendall(b"ERROR\r\n")
 
         except Exception as e:
-            print(f"Error: {e}")
+            logging.error(f"Error: {e}")  # Log the error
+            client_socket.sendall(b"ERROR\r\n")
             break
 
     client_socket.close()
@@ -82,5 +105,16 @@ def start_server():
             threading.Thread(target=handle_client, args=(client_socket,)).start()
 
 
+def save_storage_on_shutdown(sig, frame):
+    try:
+        save_data(data_store)
+        print("Storage saved. Server shutting down.")
+        exit(0)
+    except Exception as e:
+        print(f"Error saving storage: {e}")
+        exit(1)
+
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGINT, save_storage_on_shutdown)
     start_server()
